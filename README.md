@@ -34,4 +34,11 @@ python monitor_paralelo_fotmob.py --loop # loop local cada 5 min
 ## GitHub Actions
 
 El workflow `.github/workflows/monitor.yml` corre un ciclo cada 10 minutos
-y sube `log_comparacion_fotmob.jsonl` como artifact.
+(y también se puede lanzar a mano con `workflow_dispatch`). Al terminar,
+si el log cambió, lo commitea de vuelta al repositorio con el mensaje
+`Actualiza log de comparacion [skip ci]`.
+
+> Importante: los workflows programados solo se ejecutan en la rama por
+> defecto del repositorio. Asegúrate de que la rama por defecto sea la que
+> contiene `.github/workflows/monitor.yml` (por ejemplo `main`).
+

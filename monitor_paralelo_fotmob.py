@@ -48,6 +48,7 @@ import sys
 import json
 import time
 import difflib
+import unicodedata
 from datetime import datetime, timezone
 
 import requests
@@ -118,7 +119,60 @@ def obtener_partidos_en_vivo_espn():
 # =====================================================================
 
 def _normalizar(nombre):
-    return re.sub(r"[^a-z0-9]", "", nombre.lower())
+    if not nombre:
+        return ""
+    # quita acentos ("Atletico" == "Atlético") y todo lo no alfanumerico
+    sin_acentos = unicodedata.normalize("NFKD", nombre).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]", "", sin_acentos.lower())
+
+
+def _fecha_opcion(payload):
+    """Devuelve el matchDate como datetime UTC, o None si no se puede."""
+    valor = payload.get("matchDate")
+    if not valor:
+        return None
+    try:
+        return datetime.fromisoformat(valor.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _extraer_opciones(data):
+    """Normaliza las distintas formas que ha tenido la respuesta de
+    searchapi/suggest a una sola lista plana de 'options'.
+
+    Forma actual (verificada): data['matchSuggest'] es una lista de
+    bloques, cada uno con su lista 'options'. Formas antiguas: una lista
+    de bloques con 'suggestionName', o 'matchSuggest' como dict.
+    """
+    opciones = []
+
+    def _agregar(bloque):
+        if isinstance(bloque, dict):
+            for opt in bloque.get("options", []) or []:
+                if isinstance(opt, dict):
+                    opciones.append(opt)
+
+    if isinstance(data, dict):
+        ms = data.get("matchSuggest")
+        if isinstance(ms, list):
+            for bloque in ms:
+                _agregar(bloque)
+        elif isinstance(ms, dict):
+            _agregar(ms)
+        if not opciones:
+            for clave in ("suggestions", "data"):
+                bloques = data.get(clave)
+                if isinstance(bloques, list):
+                    for bloque in bloques:
+                        if isinstance(bloque, dict) and bloque.get("suggestionName") == "matchSuggest":
+                            _agregar(bloque)
+    elif isinstance(data, list):
+        for bloque in data:
+            if isinstance(bloque, dict) and bloque.get("suggestionName") == "matchSuggest":
+                _agregar(bloque)
+
+    return opciones
 
 
 def buscar_match_id_fotmob(home_nombre, away_nombre):
@@ -140,31 +194,21 @@ def buscar_match_id_fotmob(home_nombre, away_nombre):
         print(f"[AVISO] Busqueda en FotMob fallo para '{termino}': {e}")
         return None, None, None
 
-    match_suggest = None
-    for bloque in data if isinstance(data, list) else data.get("suggestions", data.get("data", [])):
-        if isinstance(bloque, dict) and bloque.get("suggestionName") == "matchSuggest":
-            match_suggest = bloque
-            break
-    # Estructura real de la respuesta no 100% fija en el tiempo -- si el
-    # bloque de arriba no aparece, se intenta la forma plana como
-    # respaldo (la documentacion consultada mostraba 'matchSuggest' como
-    # clave de nivel superior en algunas versiones).
-    opciones = []
-    if match_suggest:
-        opciones = match_suggest.get("options", [])
-    elif isinstance(data, dict) and "matchSuggest" in data:
-        opciones = data["matchSuggest"].get("options", [])
-
+    opciones = _extraer_opciones(data)
     if not opciones:
         return None, None, None
 
     home_norm = _normalizar(home_nombre)
     away_norm = _normalizar(away_nombre)
+    ahora = datetime.now(timezone.utc)
 
     mejor = None
     mejor_score = 0.0
+    mejor_delta = None
     for opcion in opciones:
         payload = opcion.get("payload", opcion)
+        if not isinstance(payload, dict):
+            continue
         h = payload.get("homeName", "")
         a = payload.get("awayName", "")
         score_directo = (
@@ -178,8 +222,18 @@ def buscar_match_id_fotmob(home_nombre, away_nombre):
             difflib.SequenceMatcher(None, away_norm, _normalizar(h)).ratio()
         )
         score = max(score_directo, score_cruzado)
-        if score > mejor_score:
+
+        # desempate: si dos candidatos empatan en nombre, se prefiere el
+        # partido cuya fecha este mas cerca de ahora (evita quedarse con
+        # un partido historico del mismo cruce)
+        fecha = _fecha_opcion(payload)
+        delta = abs((ahora - fecha).total_seconds()) if fecha else float("inf")
+
+        if score > mejor_score + 1e-9 or (
+            abs(score - mejor_score) <= 1e-9 and (mejor_delta is None or delta < mejor_delta)
+        ):
             mejor_score = score
+            mejor_delta = delta
             mejor = payload
 
     if mejor is None or mejor_score < 1.2:  # umbral laxo -- ambos nombres razonablemente parecidos
