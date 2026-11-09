@@ -1,0 +1,46 @@
+name: Monitor paralelo FotMob
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: monitor-fotmob
+  cancel-in-progress: false
+
+jobs:
+  correr-ciclo:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Correr un ciclo de comparacion
+        run: python monitor_paralelo_fotmob.py
+
+      - name: Commitear log actualizado
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # el log esta en .gitignore a proposito (no ensucia el repo local);
+          # en CI lo trackeamos a la fuerza para conservar el historial.
+          touch log_comparacion_fotmob.jsonl
+          git add -f log_comparacion_fotmob.jsonl
+          if git diff --staged --quiet; then
+            echo "Sin cambios en el log."
+          else
+            git commit -m "Actualiza log de comparacion [skip ci]"
+            git push
+          fi
